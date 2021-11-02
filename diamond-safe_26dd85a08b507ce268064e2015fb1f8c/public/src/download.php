@@ -29,9 +29,7 @@ if(!check_url()){
 
 $file = '/var/www/files/'. $_GET['file_name'];
 if (!file_exists($file)) {
-    // NEPTUNIAN
-    echo "File not Found:" . $file . "\n";
-    // redirect('vault.php');
+    redirect('vault.php');
     die();
 }
 else{
@@ -42,8 +40,6 @@ else{
     header('Cache-Control: must-revalidate');
     header('Pragma: public');
     header('Content-Length: ' . filesize($file));
-    // // NEPTUNIAN
-    echo "Downloading File:" . $file . "\n";
     readfile($file);
     exit;
 }

