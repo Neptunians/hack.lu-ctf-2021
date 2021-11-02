@@ -2,11 +2,10 @@
 
 ![Main Page](img/main_page.png)
 
-[Hacl.lu CTF](https://flu.xxx/) was a great surprise for me as a never heard about it before. And it's rated 94.98! It is organized by the official CTF team of the german Ruhr University Bochum (RUB).
+[Hack.lu CTF](https://flu.xxx/) was a great surprise for me as a never heard about it before. And it's rated 94.98! It is organized by the official CTF team of the german Ruhr University Bochum (RUB), called [FluxFingers](https://fluxfingers.net/).
 
 The Stock Market design in the page is great!
-
-I was able to take a look at only one challenge, and that was really fun and creative.
+I had the time to take a look at only one challenge, and that was really fun and creative.
 
 ## The Challenge
 
@@ -25,9 +24,47 @@ nginx -> php-fpm -> mysql
 
 Flag is located in **/flag.txt** inside the php-fpm docker container.
 
+### Running Locally
+
+1. Clone the repository:
+```bash
+$ git clone https://github.com/Neptunians/hack.lu-ctf-2021
+Cloning into 'hack.lu-ctf-2021'...
+remote: Enumerating objects: 60, done.
+remote: Counting objects: 100% (60/60), done.
+remote: Compressing objects: 100% (43/43), done.
+remote: Total 60 (delta 10), reused 57 (delta 7), pack-reused 0
+Unpacking objects: 100% (60/60), 2.11 MiB | 792.00 KiB/s, done.
+neptunian:~/Downloads/tmp$
+```
+
+2. Enter the docker-compose dir:
+
+```bash
+$ cd hack.lu-ctf-2021/diamond-safe_26dd85a08b507ce268064e2015fb1f8c/public/
+```
+
+3. Call [Docker Compose](https://docs.docker.com/compose/install/):
+
+```
+$ docker-compose up
+Starting public_db_1 ... done
+Starting public_php-fpm_1 ... done
+Starting public_web_1     ... done
+Attaching to public_db_1, public_php-fpm_1, public_web_1
+db_1       | 2021-11-02 15:28:27+00:00 [Note] [Entrypoint]: Entrypoint script for MySQL Server 5.7.36-1debian10 started.
+... Lot of lines
+web_1      | 2021/11/02 15:28:29 [notice] 1#1: start worker process 38
+web_1      | 2021/11/02 15:28:29 [notice] 1#1: start worker process 39
+```
+
+The challenge must be running on: ```http://localhost:4444/```
+
+*P.S: at the time of this writing, the challenge was still up, so I could show real challenge data.*
+
 ## Breaking the login
 
-The source code is kind of big, so we won't get into the usual detailed-level analysis.
+The source code is kind of big, so we won't get into the usual analysis of all the code.
 First, let's analyze how to bypass the login.
 
 ### Database: Prepare Query
@@ -84,7 +121,8 @@ public static function prepare($query, $args){
 * At last, it applies the string formatting with the **vsprintf** function, now that it is safe to replace the values. (Isn't it?)
 * It does not run the query. It returns the formatted string, ready to run, with the **commit** function in our database class.
 
-The fact that he made it's own implementation of a function so critical for security is the lead that we need. I took some trying to find a direct vulnerability in this function to SQL-inject, but couldn't find.
+The fact that he made it's own implementation of a function so critical for security is the lead that we need. I took some time trying to find a direct vulnerability in this function to SQL-inject, but couldn't find.
+
 The strategy taken here is flawed, but we can see it clearly in a later step.
 
 ### Login Validation
@@ -358,7 +396,7 @@ https://diamond-safe.flu.xxx/download.php?h=f2d03c27433d3643ff5d20f1409cb013&fil
 
 We have a file_name and a hash.
 
-### Understanding The Download:
+### Understanding The Download Protections
 
 * [download.php](https://github.com/Neptunians/hack.lu-ctf-2021/blob/main/diamond-safe_26dd85a08b507ce268064e2015fb1f8c/public/src/download.php)
 
@@ -458,8 +496,8 @@ function check_url(){
 * Use this parameter to check for **file_name** and **h**
 * Generate the hash:
     * Get the server **SECURE_URL_SECRET** environment variable, which we don't have.
-    * Prepare a string like SECURE_URL_SECRET|file_name|SECURE_URL_SECRET.
-    * Make a MD5 hash from it.
+    * Prepare a string in the format ```SECURE_URL_SECRET|file_name|SECURE_URL_SECRET```.
+    * Calculate the MD5 hash of this string.
 * If the calculated hash is the same hash sent in **h**, return True, for validated URL.
 
 ### Hunting for the wrong flaws
@@ -489,7 +527,7 @@ I went back to the code analysis.
 
 ### Custom Implementations + Specification Ambiguity == Hacking
 
-The obvious path to look was the custom implementation for reading the parameters in the **check_url** function. There is no reason to parse the ```$_SERVER['QUERY_STRING']```, when you can just ```$_GET['file_name']``` and ```$_GET['h']```. Even so, I kicked my ass.
+The obvious path to look was the custom implementation for reading the parameters in the **check_url** function. There is no reason to parse the ```$_SERVER['QUERY_STRING']```, when you can just ```$_GET['file_name']``` and ```$_GET['h']```. Even so, It kicked my ass.
 
 The flaw must be some difference of this custom parsing versus the php-fpm parsing of the URL.
 Different parsing implementations of the same complex or ambiguous specifications lead to some very interesting vulnerabilities. 
@@ -504,7 +542,7 @@ I just "fuzzied" some small changes, like putting a second file_name without the
 https://diamond-safe.flu.xxx/download.php?h=95f0dc5903ee9796c3503d2be76ad159&file_name=Diamond.txt&file_name
 ```
 
-It worked, beucase of the buggy ```$param += '='``` in **check_url()**, but the file_name was null and it was not enough to get the flag.
+It worked to separate the validation from the download, beucase of the buggy ```$param += '='``` in **check_url()**, that generates null string instead of concatenation. But the file_name in download.php was still null and it was not enough to get the flag.
 
 After some more fuzz... guessing, I got this:
 
@@ -512,7 +550,7 @@ After some more fuzz... guessing, I got this:
 https://diamond-safe.flu.xxx/download.php?h=95f0dc5903ee9796c3503d2be76ad159&file_name=Diamond.txt&file_name%00=../../../flag.txt
 ```
 
-It turns out the %00 is ignored in the php implementation, but not in the **check_url**. And then we got our LFI:
+It turns out the ```%00``` is ignored in the php-fpm implementation, but not in the **check_url**. And then we got our LFI:
 
 ```bash
 $ curl --path-as-is 'https://diamond-safe.flu.xxx/download.php?file_name=Diamond.txt&h=95f0dc5903ee9796c3503d2be76ad159&file_name%00=../../../flag.txt' \
